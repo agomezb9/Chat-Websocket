@@ -149,6 +149,16 @@
   const invitacion = RE_PRIVADA.test(salaUrl) ? salaUrl : null;
   const salaPublicaInicial = SALAS_PUBLICAS[salaUrl] ? salaUrl : 'general';
 
+  // Identificador de este cliente: dura lo que dure la pestaña y sobrevive a recargar la página.
+  // Se envía al servidor para que, tras recargar, mis mensajes anteriores se sigan viendo como "Tú".
+  const CID = (() => {
+    try {
+      let c = sessionStorage.getItem('chat-cid');
+      if (!c) { c = aleatorio(16); sessionStorage.setItem('chat-cid', c); }
+      return c;
+    } catch { return aleatorio(16); }
+  })();
+
   let ws = null;            // conexión actual (null si no hay o se cerró a propósito)
   let ultimo = null;        // datos de la última conexión, para reconectar
   let miId = null;          // id de mi sesión, para saber cuáles mensajes son míos
@@ -179,6 +189,7 @@
   // ---------------------------------------------------------------- conexión
   function conectar({ usuario, sala, clave }) {
     ultimo = { usuario, sala, clave };
+    guardarSesion();
     cerrarSocket();
     $('mensajes').innerHTML = '';
     salaMostrada = null;
@@ -192,7 +203,7 @@
 
     // wss:// cuando la página se abre por https:// (link público); ws:// en localhost
     const protocolo = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const params = new URLSearchParams({ usuario, sala, formato: 'json' });
+    const params = new URLSearchParams({ usuario, sala, formato: 'json', cid: CID });
     if (clave) params.set('clave', clave);
     const socket = new WebSocket(`${protocolo}//${location.host}/chat?${params}`);
     ws = socket;
@@ -212,6 +223,7 @@
       if (socket !== ws) return;   // se cerró a propósito o ya hay otra conexión
       limpiarConexion();
       if (ev.code === 1008) {      // el servidor rechazó la entrada (clave incorrecta)
+        limpiarSesion();
         mostrarInicio(ev.reason ? ev.reason + '. Revisa la clave e inténtalo de nuevo.' : 'No se pudo entrar a la sala.');
         return;
       }
@@ -252,8 +264,13 @@
       case 'pong': return;
       case 'texto':
       case 'audio': pintarMensaje(msg); return;
+      case 'historial': pintarHistorial(msg.mensajes); return;
       case 'sistema':
-        if (msg.evento === 'bienvenida') miId = msg.id;
+        if (msg.evento === 'bienvenida') {
+          miId = msg.id;
+          // Si entré como invitado, guardo el nombre que me tocó para conservarlo al reconectar o recargar
+          if (ultimo && msg.usuario) { ultimo.usuario = msg.usuario; guardarSesion(); }
+        }
         if (msg.evento === 'sala') cambiarSala(msg.sala);
         pintarSistema(msg.contenido);
         if (msg.evento === 'sala' && msg.sala.startsWith('priv-') && ultimo && ultimo.clave) {
@@ -266,6 +283,7 @@
   function cambiarSala(sala) {
     if (salaMostrada && salaMostrada !== sala) $('mensajes').innerHTML = '';
     salaMostrada = sala;
+    if (ultimo) { ultimo.sala = sala; guardarSesion(); }   // reconectar o recargar vuelve a la sala donde estoy
     const privada = sala.startsWith('priv-');
     $('sala-titulo').textContent = privada ? '🔒 Sala privada' : SALAS_PUBLICAS[sala] || sala;
     $('btn-copiar').hidden = !privada;
@@ -283,6 +301,26 @@
     div.className = 'sistema';
     div.textContent = texto;
     agregarAlChat(div);
+  }
+
+  // Mensajes anteriores de la sala, que el servidor envía al entrar (también al volver o recargar)
+  function pintarHistorial(lista) {
+    if (!Array.isArray(lista) || !lista.length) return;
+    pintarSistema('─── Mensajes anteriores ───');
+    lista.forEach(pintarMensaje);
+    pintarSistema('─── Ahora ───');
+    $('mensajes').scrollTop = $('mensajes').scrollHeight;
+  }
+
+  // Los audios que graba el navegador (webm de Chrome y Edge) no traen su duración en la cabecera, y el
+  // reproductor la muestra como 0:00 o infinita. Saltar al final obliga al navegador a calcularla.
+  function corregirDuracion(audio) {
+    audio.addEventListener('loadedmetadata', () => {
+      if (Number.isFinite(audio.duration) && audio.duration > 0) return;   // ya la trae: nada que corregir
+      const volver = () => { audio.removeEventListener('timeupdate', volver); audio.currentTime = 0; };
+      audio.addEventListener('timeupdate', volver);
+      audio.currentTime = 1e101;
+    }, { once: true });
   }
 
   function pintarMensaje(msg) {
@@ -303,6 +341,7 @@
         const audio = document.createElement('audio');
         audio.controls = true;
         audio.preload = 'metadata';
+        corregirDuracion(audio);
         audio.src = msg.contenido;
         burbuja.append(audio);
       } else {
@@ -333,11 +372,27 @@
     try { if (nombre) localStorage.setItem('chat-nombre', nombre); } catch { /* sin almacenamiento: no pasa nada */ }
   }
 
-  function codigoPrivado() {
-    const bytes = new Uint8Array(10);
+  // Letras y números al azar (con crypto cuando existe: el código de una sala privada no debe ser predecible)
+  function aleatorio(n) {
+    const bytes = new Uint8Array(n);
     if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(bytes);
     else bytes.forEach((_, i) => bytes[i] = Math.floor(Math.random() * 256));
-    return 'priv-' + Array.from(bytes, b => (b % 36).toString(36)).join('');
+    return Array.from(bytes, b => (b % 36).toString(36)).join('');
+  }
+  function codigoPrivado() { return 'priv-' + aleatorio(10); }
+
+  // La sala en la que estoy se guarda en esta pestaña: al recargar la página se vuelve a entrar sola
+  function guardarSesion() {
+    try { if (ultimo) sessionStorage.setItem('chat-sesion', JSON.stringify(ultimo)); } catch { /* sin almacenamiento */ }
+  }
+  function leerSesion() {
+    try {
+      const s = JSON.parse(sessionStorage.getItem('chat-sesion') || 'null');
+      return s && typeof s.sala === 'string' ? { usuario: s.usuario || '', sala: s.sala, clave: s.clave || '' } : null;
+    } catch { return null; }
+  }
+  function limpiarSesion() {
+    try { sessionStorage.removeItem('chat-sesion'); } catch { /* sin almacenamiento */ }
   }
 
   $('btn-publico').onclick = () => {
@@ -361,11 +416,13 @@
   };
 
   $('inv-publico').onclick = () => {
+    limpiarSesion();
     history.replaceState(null, '', location.pathname);
     location.reload();
   };
 
   $('btn-salir').onclick = () => {
+    limpiarSesion();   // salir a propósito: al recargar no se vuelve a entrar
     cerrarSocket();
     history.replaceState(null, '', location.pathname);
     if (invitacion) { location.reload(); return; }   // vuelve a la pantalla inicial limpia
@@ -514,6 +571,12 @@
   document.addEventListener('DOMContentLoaded', () => {
     $('in-nombre').value = nombreGuardado();
     $('inv-nombre').value = nombreGuardado();
+    // Si recargué la página estando dentro de una sala, vuelvo a entrar a ella y el servidor me reenvía los mensajes
+    const guardada = leerSesion();
+    if (guardada && (!invitacion || guardada.sala === invitacion)) {
+      conectar(guardada);
+      return;
+    }
     mostrarInicio('');
   });
 </script>

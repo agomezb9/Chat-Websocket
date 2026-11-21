@@ -32,9 +32,15 @@ import java.util.stream.Collectors;
  *              sala     general | musica | deportes | priv-<código>; por defecto "general"
  *              clave    para salas privadas: la fija quien la crea y los demás deben enviarla
  *              formato  "json" para recibir objetos JSON (cliente web); sin él se recibe texto plano
+ *              cid      identificador estable del cliente (el cliente web lo guarda en su pestaña);
+ *                       así, tras recargar la página, sus mensajes anteriores se reconocen como suyos
  *
- * Salas privadas: cualquier nombre "priv-" + 3 a 32 letras/números se crea al entrar el primero,
- * no aparece en /salas y se borra cuando queda vacía.
+ * Historial: cada sala guarda en memoria sus últimos mensajes (texto y voz) y se los envía a quien
+ * entra, también cuando alguien vuelve a una sala o recarga la página.
+ *
+ * Salas privadas: cualquier nombre "priv-" + 3 a 32 letras/números se crea al entrar el primero y
+ * no aparece en /salas. Si queda vacía se conserva (con su historial y su clave) unos minutos, para
+ * poder volver a entrar, y después se borra.
  *
  * Lo que envía el cliente (texto plano o JSON):
  *   hola                                   -> mensaje de texto a su sala
@@ -60,13 +66,22 @@ public class ChatSalasHandler extends TextWebSocketHandler {
     /** Máximo de caracteres de un audio en base64 (deja margen bajo el límite de 2 MB). */
     private static final int MAX_AUDIO_CHARS = 1_500_000;
 
+    /** Historial de cada sala: como máximo 200 mensajes y 1 millón de caracteres (unas 3 notas de voz). */
+    private static final int HISTORIAL_MAX_MENSAJES = 200;
+    private static final int HISTORIAL_MAX_CHARS = 1_000_000;
+
+    /** Cuánto se conserva una sala privada después de quedar vacía. */
+    private static final long PRIVADA_VACIA_TTL_MS = 30 * 60 * 1000L;
+
     private static final String SALA_POR_DEFECTO = "general";
     private static final String PREFIJO_PRIVADA = "priv-";
     private static final Pattern SALA_PRIVADA = Pattern.compile("priv-[a-z0-9]{3,32}");
+    private static final Pattern CID_VALIDO = Pattern.compile("[A-Za-z0-9_-]{8,40}");
 
     private static final String ATTR_SALA = "sala";
     private static final String ATTR_USUARIO = "usuario";
     private static final String ATTR_JSON = "json";
+    private static final String ATTR_CID = "cid";
 
     private static final DateTimeFormatter HORA =
             DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault());
@@ -77,17 +92,57 @@ public class ChatSalasHandler extends TextWebSocketHandler {
      * Lo que se envía a los clientes web (formato=json). Los clientes de texto plano reciben
      * la misma información convertida a una línea de texto.
      * tipo: texto | audio | sistema | pong.   evento (solo en "sistema"): bienvenida | sala.
+     * id: identificador del cliente que lo envió (el cid), para saber cuáles mensajes son míos.
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record Msg(String tipo, String evento, String id, String usuario,
                       String sala, Long ts, String contenido) {
     }
 
-    /** sala -> sesiones conectadas en esa sala */
-    private final Map<String, Set<WebSocketSession>> salas = new ConcurrentHashMap<>();
+    /** Los mensajes anteriores de una sala, enviados de una sola vez al cliente web al entrar. */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PaqueteHistorial(String tipo, String sala, List<Msg> mensajes) {
+    }
 
-    /** sala privada -> clave ("" si no tiene) */
-    private final Map<String, String> clavesSalas = new ConcurrentHashMap<>();
+    /** Últimos mensajes de una sala, con tope de cantidad y de tamaño. */
+    private static final class Historial {
+        private final ArrayDeque<Msg> mensajes = new ArrayDeque<>();
+        private int caracteres = 0;
+
+        synchronized void agregar(Msg m) {
+            int peso = peso(m);
+            if (peso > HISTORIAL_MAX_CHARS) {
+                return; // un audio enorme se entrega a la sala, pero no se guarda
+            }
+            mensajes.addLast(m);
+            caracteres += peso;
+            while (mensajes.size() > HISTORIAL_MAX_MENSAJES || caracteres > HISTORIAL_MAX_CHARS) {
+                caracteres -= peso(mensajes.removeFirst());
+            }
+        }
+
+        synchronized List<Msg> copia() {
+            return new ArrayList<>(mensajes);
+        }
+
+        private static int peso(Msg m) {
+            return 100 + (m.contenido() == null ? 0 : m.contenido().length());
+        }
+    }
+
+    /** Una sala: quién está dentro, sus mensajes anteriores y (si es privada) su clave. */
+    private static final class Sala {
+        final Set<WebSocketSession> miembros = ConcurrentHashMap.newKeySet();
+        final Historial historial = new Historial();
+        final String clave;           // "" si no tiene
+        volatile long vacioDesde = 0; // 0 mientras haya gente; si no, la hora (ms) en que quedó vacía
+
+        Sala(String clave) {
+            this.clave = clave;
+        }
+    }
+
+    private final Map<String, Sala> salas = new ConcurrentHashMap<>();
 
     /** id de sesión -> sesión "segura" para enviar desde varios hilos a la vez */
     private final Map<String, WebSocketSession> sesiones = new ConcurrentHashMap<>();
@@ -97,7 +152,7 @@ public class ChatSalasHandler extends TextWebSocketHandler {
 
     public ChatSalasHandler() {
         for (String sala : SALAS) {
-            salas.put(sala, ConcurrentHashMap.newKeySet());
+            salas.put(sala, new Sala(""));
         }
     }
 
@@ -117,7 +172,9 @@ public class ChatSalasHandler extends TextWebSocketHandler {
         if (usuario.isEmpty()) {
             usuario = "Invitado-" + session.getId().substring(0, 4);
         }
+        String cid = params.getOrDefault("cid", "");
         session.getAttributes().put(ATTR_USUARIO, usuario);
+        session.getAttributes().put(ATTR_CID, CID_VALIDO.matcher(cid).matches() ? cid : session.getId());
         session.getAttributes().put(ATTR_JSON, "json".equalsIgnoreCase(params.get("formato")));
 
         String sala = normalizarSala(params.get("sala"));
@@ -126,17 +183,16 @@ public class ChatSalasHandler extends TextWebSocketHandler {
         }
 
         System.out.println("🔌 [CHAT] Conectado: " + usuario + " (" + session.getId() + ")");
-        entregar(segura, new Msg("sistema", "bienvenida", session.getId(), usuario, null, ahora(),
+        entregar(segura, new Msg("sistema", "bienvenida", cidDe(session), usuario, null, ahora(),
                 "Bienvenido/a " + usuario + ". Salas públicas: " + String.join(", ", SALAS)
                         + ". Escribe /ayuda para ver los comandos."));
 
-        if (!agregar(segura, sala, params.getOrDefault("clave", ""))) {
+        if (!entrar(session, segura, sala, params.getOrDefault("clave", ""))) {
             aviso(segura, "🔒 Clave incorrecta para esa sala privada.");
             session.close(CloseStatus.POLICY_VIOLATION.withReason("Clave incorrecta"));
             return;
         }
-        session.getAttributes().put(ATTR_SALA, sala);
-        anunciarEntrada(session, segura, sala);
+        anunciarEntrada(session, sala);
     }
 
     @Override
@@ -202,7 +258,7 @@ public class ChatSalasHandler extends TextWebSocketHandler {
         if (!esPrivada(sala)) {
             System.out.println("💬 [" + sala + "] " + usuarioDe(session) + ": " + texto);
         }
-        difundir(sala, mensaje("texto", session, sala, texto));
+        publicar(sala, mensaje("texto", session, sala, texto));
     }
 
     private void procesarAudio(WebSocketSession session, WebSocketSession segura, String datos) {
@@ -221,7 +277,7 @@ public class ChatSalasHandler extends TextWebSocketHandler {
         if (!esPrivada(sala)) {
             System.out.println("🎤 [" + sala + "] " + usuarioDe(session) + ": mensaje de voz (" + datos.length() / 1024 + " KB)");
         }
-        difundir(sala, mensaje("audio", session, sala, datos));
+        publicar(sala, mensaje("audio", session, sala, datos));
     }
 
     private void procesarComando(WebSocketSession session, WebSocketSession segura, String texto) {
@@ -279,16 +335,15 @@ public class ChatSalasHandler extends TextWebSocketHandler {
             aviso(segura, "⚠️ Sala no válida. Usa: /unirse general | musica | deportes | priv-<código> [clave]");
         } else if (nueva.equals(actual)) {
             aviso(segura, "Ya estás en la sala " + nueva.toUpperCase());
-        } else if (!agregar(segura, nueva, clave)) {
+        } else if (!entrar(session, segura, nueva, clave)) {
             // Si la clave falla, el usuario sigue en la sala donde estaba
             aviso(segura, "🔒 Clave incorrecta para esa sala privada.");
         } else {
-            session.getAttributes().put(ATTR_SALA, nueva);
             if (actual != null) {
                 quitar(segura, actual);
                 difundir(actual, avisoMsg("🔴 " + usuarioDe(session) + " salió de la sala " + actual.toUpperCase()));
             }
-            anunciarEntrada(session, segura, nueva);
+            anunciarEntrada(session, nueva);
         }
     }
 
@@ -297,44 +352,64 @@ public class ChatSalasHandler extends TextWebSocketHandler {
     // ------------------------------------------------------------------
 
     /**
-     * Mete la sesión en la sala. En una sala privada que no existe la crea y guarda la clave;
-     * si ya existe y tiene clave, solo deja entrar si coincide. Devuelve false si se rechaza.
+     * Mete la sesión en la sala y le envía el aviso de entrada y los mensajes anteriores. En una
+     * sala privada que no existe la crea y guarda la clave; si ya existe y tiene clave, solo deja
+     * entrar si coincide. Devuelve false si se rechaza.
      */
-    private boolean agregar(WebSocketSession segura, String sala, String clave) {
+    private boolean entrar(WebSocketSession session, WebSocketSession segura, String sala, String clave) {
+        Sala s;
         synchronized (lock) {
-            Set<WebSocketSession> grupo = salas.get(sala);
+            borrarPrivadasVencidas();
+            s = salas.get(sala);
             if (esPrivada(sala)) {
-                if (grupo == null) {
-                    grupo = ConcurrentHashMap.newKeySet();
-                    salas.put(sala, grupo);
-                    clavesSalas.put(sala, clave);
-                } else if (!claveCorrecta(clavesSalas.getOrDefault(sala, ""), clave)) {
+                if (s == null) {
+                    s = new Sala(clave);
+                    salas.put(sala, s);
+                } else if (!claveCorrecta(s.clave, clave)) {
                     return false;
                 }
             }
-            grupo.add(segura);
-            return true;
+            s.vacioDesde = 0; // marcada en uso: nadie la borra mientras se termina de entrar
         }
+        // Mismo candado que usa publicar(): quien entra recibe primero los mensajes anteriores y después
+        // los nuevos, en orden, sin repetir ninguno ni perder ninguno. El envío no se hace con el
+        // candado general tomado, para que un cliente lento no frene a los demás.
+        synchronized (s.historial) {
+            s.miembros.add(segura);
+            session.getAttributes().put(ATTR_SALA, sala);
+            entregar(segura, new Msg("sistema", "sala", null, null, sala, ahora(),
+                    "✅ Entraste a la sala " + sala.toUpperCase()));
+            enviarHistorial(segura, sala, s.historial.copia());
+        }
+        return true;
     }
 
-    /** Saca la sesión de la sala; una sala privada que queda vacía se elimina. */
+    /** Saca la sesión de la sala; una sala privada que queda vacía empieza a contar su tiempo de vida. */
     private void quitar(WebSocketSession segura, String sala) {
         synchronized (lock) {
-            Set<WebSocketSession> grupo = salas.get(sala);
-            if (grupo == null) {
+            Sala s = salas.get(sala);
+            if (s == null) {
                 return;
             }
-            grupo.remove(segura);
-            if (esPrivada(sala) && grupo.isEmpty()) {
-                salas.remove(sala);
-                clavesSalas.remove(sala);
+            s.miembros.remove(segura);
+            if (esPrivada(sala) && s.miembros.isEmpty()) {
+                s.vacioDesde = System.currentTimeMillis();
             }
+            borrarPrivadasVencidas();
         }
     }
 
-    private void anunciarEntrada(WebSocketSession session, WebSocketSession segura, String sala) {
-        entregar(segura, new Msg("sistema", "sala", null, null, sala, ahora(),
-                "✅ Entraste a la sala " + sala.toUpperCase()));
+    /** Borra las salas privadas que llevan vacías más del tiempo permitido. Llamar con el candado tomado. */
+    private void borrarPrivadasVencidas() {
+        long limite = System.currentTimeMillis() - PRIVADA_VACIA_TTL_MS;
+        salas.entrySet().removeIf(e -> esPrivada(e.getKey())
+                && e.getValue().miembros.isEmpty()
+                && e.getValue().vacioDesde > 0
+                && e.getValue().vacioDesde < limite);
+    }
+
+    /** Avisa a los demás de la sala que alguien entró. */
+    private void anunciarEntrada(WebSocketSession session, String sala) {
         difundirExcepto(sala, avisoMsg("🟢 " + usuarioDe(session) + " entró a la sala " + sala.toUpperCase()),
                 session.getId());
         System.out.println("➡️ [CHAT] " + usuarioDe(session) + " entró a " + (esPrivada(sala) ? "una sala privada" : sala));
@@ -349,8 +424,20 @@ public class ChatSalasHandler extends TextWebSocketHandler {
     }
 
     private Set<WebSocketSession> miembros(String sala) {
-        Set<WebSocketSession> grupo = sala == null ? null : salas.get(sala);
-        return grupo == null ? Set.of() : grupo;
+        Sala s = sala == null ? null : salas.get(sala);
+        return s == null ? Set.of() : s.miembros;
+    }
+
+    /** Guarda un mensaje (texto o voz) en el historial de la sala y lo envía a quienes están dentro. */
+    private void publicar(String sala, Msg msg) {
+        Sala s = salas.get(sala);
+        if (s == null) {
+            return;
+        }
+        synchronized (s.historial) {
+            s.historial.agregar(msg);
+            difundir(sala, msg);
+        }
     }
 
     private void difundir(String sala, Msg mensaje) {
@@ -371,11 +458,32 @@ public class ChatSalasHandler extends TextWebSocketHandler {
 
     /** Envía un mensaje a un usuario: JSON para el cliente web, una línea de texto para los demás. */
     private void entregar(WebSocketSession destino, Msg msg) {
+        enviar(destino, msg, comoTexto(msg));
+    }
+
+    /**
+     * Envía los mensajes anteriores de la sala. El cliente web los recibe en un solo paquete;
+     * los clientes de texto plano, como una línea por mensaje entre dos avisos.
+     */
+    private void enviarHistorial(WebSocketSession destino, String sala, List<Msg> anteriores) {
+        if (anteriores.isEmpty()) {
+            return;
+        }
+        if (esJson(destino)) {
+            enviar(destino, new PaqueteHistorial("historial", sala, anteriores), null);
+        } else {
+            aviso(destino, "📜 Mensajes anteriores de la sala:");
+            anteriores.forEach(m -> entregar(destino, m));
+            aviso(destino, "📜 — fin de los mensajes anteriores —");
+        }
+    }
+
+    private void enviar(WebSocketSession destino, Object comoJson, String comoTexto) {
         if (destino == null || !destino.isOpen()) {
             return;
         }
         try {
-            String salida = esJson(destino) ? JSON.writeValueAsString(msg) : comoTexto(msg);
+            String salida = esJson(destino) ? JSON.writeValueAsString(comoJson) : comoTexto;
             destino.sendMessage(new TextMessage(salida));
         } catch (Exception e) {
             // Un destinatario lento o caído no debe impedir que el resto reciba el mensaje
@@ -395,7 +503,7 @@ public class ChatSalasHandler extends TextWebSocketHandler {
     }
 
     private Msg mensaje(String tipo, WebSocketSession session, String sala, String contenido) {
-        return new Msg(tipo, null, session.getId(), usuarioDe(session), sala, ahora(), contenido);
+        return new Msg(tipo, null, cidDe(session), usuarioDe(session), sala, ahora(), contenido);
     }
 
     private Msg avisoMsg(String contenido) {
@@ -455,5 +563,9 @@ public class ChatSalasHandler extends TextWebSocketHandler {
 
     private String usuarioDe(WebSocketSession session) {
         return (String) session.getAttributes().getOrDefault(ATTR_USUARIO, "?");
+    }
+
+    private String cidDe(WebSocketSession session) {
+        return (String) session.getAttributes().getOrDefault(ATTR_CID, session.getId());
     }
 }
