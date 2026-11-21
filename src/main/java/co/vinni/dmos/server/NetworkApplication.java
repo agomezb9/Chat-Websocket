@@ -1,0 +1,27 @@
+package co.vinni.dmos.server;
+
+import jakarta.annotation.PostConstruct;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+// scanBasePackages: sin esto Spring solo busca en co.vinni.dmos.server y NO carga WebSocketConfig
+@SpringBootApplication(scanBasePackages = "co.vinni.dmos")
+public class NetworkApplication {
+
+    @Value("${server.port:8860}")
+    private String port;
+
+    public static void main(String[] args) {
+        SpringApplication.run(NetworkApplication.class, args);
+    }
+
+    // 2. Este método se ejecuta automáticamente justo después de que el servidor levanta
+    @PostConstruct
+    public void init() {
+        System.out.println("\n🚀 Servidor de Redes con Spring Boot corriendo en: ws://localhost:" + port + "/network-monitor");
+        System.out.println("💬 Chat con salas (general, musica, deportes): ws://localhost:" + port + "/chat");
+        System.out.println("🌐 Cliente web: http://localhost:" + port + "/chat.html");
+        System.out.println("🖥️ Cliente de consola: ejecutar co.vinni.dmos.cliente.ChatCliente\n");
+    }
+}

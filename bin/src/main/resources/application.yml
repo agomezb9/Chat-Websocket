@@ -1,0 +1,4 @@
+server:
+  # En la nube (Render, Railway, Koyeb) el puerto lo asigna la plataforma en la variable PORT.
+  # En tu PC, si PORT no existe, se usa 8862.
+  port: ${PORT:8862}

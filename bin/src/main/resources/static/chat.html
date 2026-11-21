@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat por salas</title>
+<style>
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body { font-family: system-ui, sans-serif; margin: 0; background: #f2f4f7; color: #1d2433; }
+  input, button { font: inherit; padding: 8px 12px; border-radius: 8px; border: 1px solid #c7ccd6; }
+  button { cursor: pointer; background: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primario { background: #2f6fed; color: #fff; border-color: #2f6fed; }
+  button.grande { padding: 14px 20px; font-size: 17px; width: 100%; }
+  .aviso { color: #b42318; min-height: 22px; margin: 6px 0; }
+
+  /* ---------- Pantallas de inicio e invitación ---------- */
+  .centro { max-width: 760px; margin: 0 auto; padding: 32px 16px; }
+  .centro h1 { margin: 0 0 4px; }
+  .centro p { color: #4a5368; }
+  .centro input { width: 100%; margin-bottom: 10px; }
+  .tarjetas { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 8px; }
+  .tarjeta { background: #fff; border: 1px solid #dde1e8; border-radius: 12px; padding: 20px; display: flex; flex-direction: column; }
+  .tarjeta h2 { margin: 0 0 6px; font-size: 19px; }
+  .tarjeta p { flex: 1; margin: 0 0 14px; }
+  .enlace { background: none; border: none; color: #2f6fed; text-decoration: underline; padding: 8px 0; }
+
+  /* ---------- Pantalla de chat ---------- */
+  #pantalla-chat { display: flex; flex-direction: column; height: 100dvh; }
+  header { background: #1d2433; color: #fff; padding: 10px 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 17px; margin: 0 8px 0 0; }
+  #sala-titulo { background: #2f6fed; padding: 3px 10px; border-radius: 99px; font-size: 14px; }
+  #estado { font-size: 14px; opacity: .85; margin-right: auto; }
+  header button { padding: 5px 10px; font-size: 14px; }
+  main { flex: 1; display: flex; min-height: 0; }
+  aside { width: 190px; padding: 16px; background: #fff; border-right: 1px solid #dde1e8; overflow-y: auto; }
+  aside strong { display: block; margin-bottom: 10px; }
+  aside button { display: block; width: 100%; margin-bottom: 8px; text-align: left; }
+  aside button.activa { background: #2f6fed; color: #fff; border-color: #2f6fed; }
+  section.chat { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
+  #mensajes { flex: 1; overflow-y: auto; padding: 16px; }
+  .sistema { color: #6b7385; font-size: 14px; margin: 6px 0; text-align: center; white-space: pre-wrap; }
+  .fila { display: flex; margin-bottom: 8px; }
+  .fila.propio { justify-content: flex-end; }
+  .burbuja { max-width: min(80%, 460px); background: #fff; border: 1px solid #dde1e8; border-radius: 12px; padding: 8px 12px; }
+  .propio .burbuja { background: #dce8ff; border-color: #bcd2fb; }
+  .cab { font-size: 12px; color: #6b7385; margin-bottom: 2px; }
+  .texto { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .burbuja audio { display: block; max-width: 100%; margin-top: 4px; }
+  #formulario { display: flex; gap: 8px; padding: 10px; background: #fff; border-top: 1px solid #dde1e8; }
+  #formulario input { flex: 1; min-width: 0; }
+  #formulario button { padding: 8px 12px; }
+  #btn-mic.grabando { background: #d92d20; color: #fff; border-color: #d92d20; }
+  #panel-emojis { position: absolute; left: 10px; bottom: 62px; background: #fff; border: 1px solid #c7ccd6; border-radius: 12px;
+    padding: 8px; display: grid; grid-template-columns: repeat(8, 1fr); gap: 2px; box-shadow: 0 4px 16px rgba(0,0,0,.15); max-width: calc(100% - 20px); }
+  #panel-emojis button { border: none; background: none; font-size: 22px; padding: 4px; line-height: 1; }
+  #panel-emojis button:hover { background: #eef1f6; }
+
+  @media (max-width: 640px) {
+    .tarjetas { grid-template-columns: 1fr; }
+    main { flex-direction: column; }
+    aside { width: 100%; padding: 8px; display: flex; gap: 8px; border-right: none; border-bottom: 1px solid #dde1e8; overflow-x: auto; }
+    aside strong { display: none; }
+    aside button { width: auto; margin: 0; white-space: nowrap; }
+    #panel-emojis { grid-template-columns: repeat(6, 1fr); }
+    header h1 { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ======================= Pantalla inicial ======================= -->
+<div id="pantalla-inicio" class="centro" hidden>
+  <h1>💬 Chat por salas</h1>
+  <p>Escribe tu nombre (o déjalo vacío para entrar como invitado) y elige cómo entrar.</p>
+  <input id="in-nombre" placeholder="Tu nombre (opcional)" maxlength="30" autocomplete="nickname">
+  <div id="aviso-inicio" class="aviso" role="alert"></div>
+  <div class="tarjetas">
+    <section class="tarjeta">
+      <h2>🌐 Chat público</h2>
+      <p>Salas General, Música y Deportes abiertas para todos.</p>
+      <button id="btn-publico" class="primario grande">Entrar al chat público</button>
+    </section>
+    <section class="tarjeta">
+      <h2>🔒 Sala privada</h2>
+      <p>Se crea una sala nueva y oculta. Después copias el link y se lo envías a quien quieras.</p>
+      <input id="in-clave-nueva" placeholder="Clave (opcional)" maxlength="40" autocomplete="off">
+      <button id="btn-privada" class="primario grande">Crear sala privada</button>
+    </section>
+  </div>
+</div>
+
+<!-- ======================= Pantalla de invitación (?sala=priv-xxxx) ======================= -->
+<form id="pantalla-invitacion" class="centro" hidden>
+  <h1>🔒 Sala privada</h1>
+  <p>Te invitaron a una sala privada. Escribe tu nombre para entrar (o pulsa Enter para entrar como invitado).</p>
+  <input id="inv-nombre" placeholder="Tu nombre" maxlength="30" autocomplete="nickname">
+  <input id="inv-clave" placeholder="Clave (solo si la sala tiene)" maxlength="40" autocomplete="off">
+  <div id="aviso-invitacion" class="aviso" role="alert"></div>
+  <button class="primario grande">Entrar a la sala</button>
+  <button type="button" id="inv-publico" class="enlace">Mejor ir al chat público</button>
+</form>
+
+<!-- ======================= Pantalla de chat ======================= -->
+<div id="pantalla-chat" hidden>
+  <header>
+    <h1>💬 Chat por salas</h1>
+    <span id="sala-titulo">…</span>
+    <span id="estado">Conectando…</span>
+    <button id="btn-copiar" hidden>🔗 Copiar link de invitación</button>
+    <button id="btn-reconectar" hidden>🔄 Reconectar</button>
+    <button id="btn-salir">Salir</button>
+  </header>
+  <main>
+    <aside>
+      <strong>Salas públicas</strong>
+      <button data-sala="general">🌐 General</button>
+      <button data-sala="musica">🎵 Música</button>
+      <button data-sala="deportes">⚽ Deportes</button>
+      <button id="btn-usuarios">👥 Usuarios</button>
+    </aside>
+    <section class="chat">
+      <div id="mensajes" aria-live="polite"></div>
+      <div id="panel-emojis" hidden></div>
+      <form id="formulario" autocomplete="off">
+        <button type="button" id="btn-emoji" title="Emojis" aria-label="Emojis">😊</button>
+        <button type="button" id="btn-mic" title="Grabar mensaje de voz" aria-label="Grabar mensaje de voz">🎤</button>
+        <input id="texto" placeholder="Escribe un mensaje o /ayuda" maxlength="2000">
+        <button class="primario">Enviar</button>
+      </form>
+    </section>
+  </main>
+</div>
+
+<script>
+  const $ = id => document.getElementById(id);
+
+  const SALAS_PUBLICAS = { general: '🌐 General', musica: '🎵 Música', deportes: '⚽ Deportes' };
+  const RE_PRIVADA = /^priv-[a-z0-9]{3,32}$/;
+  const MAX_GRABACION_S = 60;           // un audio de 60 s pesa unos 300 KB en base64
+  const MAX_AUDIO_CHARS = 1400000;      // el servidor acepta hasta 1.5 millones
+  // Separados por espacios (no con Array.from): algunos emojis, como ❤️ y ✌️, son dos caracteres en uno
+  const EMOJIS = ('😀 😃 😄 😁 😆 😅 😂 🤣 😊 😇 🙂 😉 😍 🥰 😘 😋 😎 🤩 🥳 😏 😴 🤔 😮 😢 😭 😡 🤯 😱 🤗 🙄 😬 ' +
+    '👍 👎 👏 🙌 🙏 💪 👋 ✌️ 🤝 ❤️ 🧡 💛 💚 💙 💜 🖤 💔 🔥 ✨ 🎉 🎵 🎶 🎸 🎧 ⚽ 🏀 🏆 🍕 🍔 ☕ 🌎 🚀 💯 ✅ ❌').split(' ');
+
+  // Lo que pide el link: ?sala=priv-xxxx (invitación) o ?sala=musica (sala pública preseleccionada)
+  const salaUrl = (new URLSearchParams(location.search).get('sala') || '').toLowerCase();
+  const invitacion = RE_PRIVADA.test(salaUrl) ? salaUrl : null;
+  const salaPublicaInicial = SALAS_PUBLICAS[salaUrl] ? salaUrl : 'general';
+
+  let ws = null;            // conexión actual (null si no hay o se cerró a propósito)
+  let ultimo = null;        // datos de la última conexión, para reconectar
+  let miId = null;          // id de mi sesión, para saber cuáles mensajes son míos
+  let salaMostrada = null;  // sala que se está mostrando en pantalla
+  let pingTimer = null;
+
+  // ---------------------------------------------------------------- pantallas
+  function mostrar(nombre) {
+    for (const id of ['pantalla-inicio', 'pantalla-invitacion', 'pantalla-chat']) {
+      $(id).hidden = id !== nombre;
+    }
+  }
+
+  function mostrarInicio(aviso) {
+    $('aviso-inicio').textContent = '';
+    $('aviso-invitacion').textContent = '';
+    if (invitacion) {
+      mostrar('pantalla-invitacion');
+      $('aviso-invitacion').textContent = aviso || '';
+      $('inv-nombre').focus();
+    } else {
+      mostrar('pantalla-inicio');
+      $('aviso-inicio').textContent = aviso || '';
+      $('in-nombre').focus();
+    }
+  }
+
+  // ---------------------------------------------------------------- conexión
+  function conectar({ usuario, sala, clave }) {
+    ultimo = { usuario, sala, clave };
+    cerrarSocket();
+    $('mensajes').innerHTML = '';
+    salaMostrada = null;
+    miId = null;
+    mostrar('pantalla-chat');
+    $('btn-reconectar').hidden = true;
+    $('btn-copiar').hidden = true;
+    $('sala-titulo').textContent = '…';
+    setEstado('Conectando…');
+    marcarSala(null);
+
+    // wss:// cuando la página se abre por https:// (link público); ws:// en localhost
+    const protocolo = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const params = new URLSearchParams({ usuario, sala, formato: 'json' });
+    if (clave) params.set('clave', clave);
+    const socket = new WebSocket(`${protocolo}//${location.host}/chat?${params}`);
+    ws = socket;
+
+    socket.onopen = () => {
+      setEstado('🟢 Conectado');
+      $('btn-mic').disabled = false;
+      // Los servicios en la nube y los túneles cierran las conexiones inactivas: un ping cada 30 s las mantiene vivas
+      pingTimer = setInterval(() => enviar({ tipo: 'ping' }), 30000);
+    };
+    socket.onmessage = e => {
+      let msg;
+      try { msg = JSON.parse(e.data); } catch { return; }
+      recibir(msg);
+    };
+    socket.onclose = ev => {
+      if (socket !== ws) return;   // se cerró a propósito o ya hay otra conexión
+      limpiarConexion();
+      if (ev.code === 1008) {      // el servidor rechazó la entrada (clave incorrecta)
+        mostrarInicio(ev.reason ? ev.reason + '. Revisa la clave e inténtalo de nuevo.' : 'No se pudo entrar a la sala.');
+        return;
+      }
+      setEstado('🔴 Desconectado');
+      pintarSistema('Se cerró la conexión con el servidor.');
+      $('btn-reconectar').hidden = false;
+    };
+  }
+
+  function cerrarSocket() {
+    const anterior = ws;
+    ws = null;                     // antes de cerrar, para que onclose lo ignore
+    limpiarConexion();
+    if (anterior) anterior.close();
+  }
+
+  function limpiarConexion() {
+    clearInterval(pingTimer);
+    pingTimer = null;
+    detenerGrabacion(true);
+    $('btn-mic').disabled = true;
+    $('panel-emojis').hidden = true;
+  }
+
+  function enviar(objeto) {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(objeto));
+      return true;
+    }
+    return false;
+  }
+
+  function setEstado(texto) { $('estado').textContent = texto; }
+
+  // ---------------------------------------------------------------- mensajes recibidos
+  function recibir(msg) {
+    switch (msg.tipo) {
+      case 'pong': return;
+      case 'texto':
+      case 'audio': pintarMensaje(msg); return;
+      case 'sistema':
+        if (msg.evento === 'bienvenida') miId = msg.id;
+        if (msg.evento === 'sala') cambiarSala(msg.sala);
+        pintarSistema(msg.contenido);
+        if (msg.evento === 'sala' && msg.sala.startsWith('priv-') && ultimo && ultimo.clave) {
+          pintarSistema('🔑 Esta sala tiene clave: quien abra el link tendrá que escribirla.');
+        }
+        return;
+    }
+  }
+
+  function cambiarSala(sala) {
+    if (salaMostrada && salaMostrada !== sala) $('mensajes').innerHTML = '';
+    salaMostrada = sala;
+    const privada = sala.startsWith('priv-');
+    $('sala-titulo').textContent = privada ? '🔒 Sala privada' : SALAS_PUBLICAS[sala] || sala;
+    $('btn-copiar').hidden = !privada;
+    marcarSala(privada ? null : sala);
+    // La barra de direcciones queda con el link de invitación (sin la clave) o limpia
+    history.replaceState(null, '', privada ? `?sala=${sala}` : location.pathname);
+  }
+
+  function marcarSala(sala) {
+    document.querySelectorAll('[data-sala]').forEach(b => b.classList.toggle('activa', b.dataset.sala === sala));
+  }
+
+  function pintarSistema(texto) {
+    const div = document.createElement('div');
+    div.className = 'sistema';
+    div.textContent = texto;
+    agregarAlChat(div);
+  }
+
+  function pintarMensaje(msg) {
+    const propio = !!msg.id && msg.id === miId;
+    const fila = document.createElement('div');
+    fila.className = 'fila' + (propio ? ' propio' : '');
+    const burbuja = document.createElement('div');
+    burbuja.className = 'burbuja';
+
+    const cab = document.createElement('div');
+    cab.className = 'cab';
+    const hora = msg.ts ? new Date(msg.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+    cab.textContent = (propio ? 'Tú' : msg.usuario) + (hora ? ' · ' + hora : '');
+    burbuja.append(cab);
+
+    if (msg.tipo === 'audio') {
+      if (typeof msg.contenido === 'string' && msg.contenido.startsWith('data:audio/')) {
+        const audio = document.createElement('audio');
+        audio.controls = true;
+        audio.preload = 'metadata';
+        audio.src = msg.contenido;
+        burbuja.append(audio);
+      } else {
+        burbuja.append('🎤 (audio no válido)');
+      }
+    } else {
+      const texto = document.createElement('div');
+      texto.className = 'texto';
+      texto.textContent = msg.contenido;   // textContent: nunca se interpreta como HTML
+      burbuja.append(texto);
+    }
+    fila.append(burbuja);
+    agregarAlChat(fila);
+  }
+
+  function agregarAlChat(nodo) {
+    const caja = $('mensajes');
+    const alFinal = caja.scrollHeight - caja.scrollTop - caja.clientHeight < 80;
+    caja.append(nodo);
+    if (alFinal || nodo.classList.contains('propio')) caja.scrollTop = caja.scrollHeight;
+  }
+
+  // ---------------------------------------------------------------- inicio, invitación, salida
+  function nombreGuardado() {
+    try { return localStorage.getItem('chat-nombre') || ''; } catch { return ''; }
+  }
+  function guardarNombre(nombre) {
+    try { if (nombre) localStorage.setItem('chat-nombre', nombre); } catch { /* sin almacenamiento: no pasa nada */ }
+  }
+
+  function codigoPrivado() {
+    const bytes = new Uint8Array(10);
+    if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(bytes);
+    else bytes.forEach((_, i) => bytes[i] = Math.floor(Math.random() * 256));
+    return 'priv-' + Array.from(bytes, b => (b % 36).toString(36)).join('');
+  }
+
+  $('btn-publico').onclick = () => {
+    const usuario = $('in-nombre').value.trim();
+    guardarNombre(usuario);
+    history.replaceState(null, '', location.pathname);
+    conectar({ usuario, sala: salaPublicaInicial, clave: '' });
+  };
+
+  $('btn-privada').onclick = () => {
+    const usuario = $('in-nombre').value.trim();
+    guardarNombre(usuario);
+    conectar({ usuario, sala: codigoPrivado(), clave: $('in-clave-nueva').value.trim() });
+  };
+
+  $('pantalla-invitacion').onsubmit = e => {
+    e.preventDefault();
+    const usuario = $('inv-nombre').value.trim();
+    guardarNombre(usuario);
+    conectar({ usuario, sala: invitacion, clave: $('inv-clave').value.trim() });
+  };
+
+  $('inv-publico').onclick = () => {
+    history.replaceState(null, '', location.pathname);
+    location.reload();
+  };
+
+  $('btn-salir').onclick = () => {
+    cerrarSocket();
+    history.replaceState(null, '', location.pathname);
+    if (invitacion) { location.reload(); return; }   // vuelve a la pantalla inicial limpia
+    mostrarInicio('');
+  };
+
+  $('btn-reconectar').onclick = () => { if (ultimo) conectar(ultimo); };
+
+  // ---------------------------------------------------------------- enlace de invitación
+  $('btn-copiar').onclick = async () => {
+    const link = `${location.origin}${location.pathname}?sala=${salaMostrada}`;
+    let copiado = false;
+    try {
+      await navigator.clipboard.writeText(link);
+      copiado = true;
+    } catch {
+      const area = document.createElement('textarea');   // alternativa si no hay portapapeles (http)
+      area.value = link;
+      document.body.append(area);
+      area.select();
+      try { copiado = document.execCommand('copy'); } catch { /* se muestra el link abajo */ }
+      area.remove();
+    }
+    if (copiado) {
+      const boton = $('btn-copiar');
+      boton.textContent = '✅ ¡Copiado!';
+      setTimeout(() => boton.textContent = '🔗 Copiar link de invitación', 2000);
+    } else {
+      pintarSistema('Copia este link y envíalo: ' + link);
+    }
+  };
+
+  // ---------------------------------------------------------------- salas y comandos
+  document.querySelectorAll('[data-sala]').forEach(b => b.onclick = () => {
+    enviar({ tipo: 'texto', contenido: '/unirse ' + b.dataset.sala });
+  });
+  $('btn-usuarios').onclick = () => enviar({ tipo: 'texto', contenido: '/usuarios' });
+
+  $('formulario').onsubmit = e => {
+    e.preventDefault();
+    const texto = $('texto').value.trim();
+    if (texto && enviar({ tipo: 'texto', contenido: texto })) $('texto').value = '';
+  };
+
+  // ---------------------------------------------------------------- emojis
+  const panel = $('panel-emojis');
+  for (const emoji of EMOJIS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = emoji;
+    b.onclick = () => {
+      const campo = $('texto');
+      campo.setRangeText(emoji, campo.selectionStart, campo.selectionEnd, 'end');
+      campo.focus();
+    };
+    panel.append(b);
+  }
+  $('btn-emoji').onclick = e => { e.stopPropagation(); panel.hidden = !panel.hidden; };
+  document.addEventListener('click', e => { if (!panel.contains(e.target)) panel.hidden = true; });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') panel.hidden = true; });
+
+  // ---------------------------------------------------------------- mensajes de voz
+  let grabador = null, flujo = null, trozos = [], cancelada = false, iniciando = false;
+  let tiempoGrabacion = 0, timerGrabacion = null;
+
+  function leerComoDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const lector = new FileReader();
+      lector.onload = () => resolve(lector.result);
+      lector.onerror = () => reject(lector.error);
+      lector.readAsDataURL(blob);
+    });
+  }
+
+  function actualizarBotonMic() {
+    const boton = $('btn-mic');
+    boton.classList.toggle('grabando', !!grabador);
+    boton.textContent = grabador ? `⏹ ${tiempoGrabacion}s` : '🎤';
+    boton.title = grabador ? 'Detener y enviar' : 'Grabar mensaje de voz';
+  }
+
+  async function alternarGrabacion() {
+    if (grabador) { detenerGrabacion(false); return; }
+    if (iniciando || !ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!navigator.mediaDevices || !window.MediaRecorder) {
+      pintarSistema('⚠️ Este navegador no permite grabar audio.');
+      return;
+    }
+    iniciando = true;
+    try {
+      flujo = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      pintarSistema('⚠️ No se pudo usar el micrófono. Revisa el permiso del navegador (y que la página abra por https o localhost).');
+      iniciando = false;
+      return;
+    }
+    iniciando = false;
+
+    const tipos = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+    const mime = tipos.find(t => MediaRecorder.isTypeSupported(t));
+    grabador = mime ? new MediaRecorder(flujo, { mimeType: mime, audioBitsPerSecond: 32000 }) : new MediaRecorder(flujo);
+    trozos = [];
+    cancelada = false;
+    const esteGrabador = grabador;
+
+    esteGrabador.ondataavailable = e => { if (e.data.size) trozos.push(e.data); };
+    esteGrabador.onstop = async () => {
+      clearInterval(timerGrabacion);
+      flujo.getTracks().forEach(t => t.stop());
+      const tipo = esteGrabador.mimeType || mime || 'audio/webm';
+      grabador = null;
+      actualizarBotonMic();
+      if (cancelada || !trozos.length) return;
+      try {
+        const dataUrl = await leerComoDataUrl(new Blob(trozos, { type: tipo }));
+        if (dataUrl.length > MAX_AUDIO_CHARS) {
+          pintarSistema('⚠️ El audio es demasiado largo. Graba uno más corto.');
+        } else if (!enviar({ tipo: 'audio', contenido: dataUrl })) {
+          pintarSistema('⚠️ No se envió el audio: no hay conexión.');
+        }
+      } catch {
+        pintarSistema('⚠️ No se pudo procesar el audio.');
+      }
+    };
+
+    esteGrabador.start();
+    tiempoGrabacion = 0;
+    actualizarBotonMic();
+    timerGrabacion = setInterval(() => {
+      tiempoGrabacion++;
+      actualizarBotonMic();
+      if (tiempoGrabacion >= MAX_GRABACION_S) detenerGrabacion(false);
+    }, 1000);
+  }
+
+  function detenerGrabacion(descartar) {
+    if (!grabador) return;
+    cancelada = descartar;
+    if (grabador.state !== 'inactive') grabador.stop();
+  }
+
+  $('btn-mic').onclick = alternarGrabacion;
+  $('btn-mic').disabled = true;
+
+  // ---------------------------------------------------------------- arranque
+  document.addEventListener('DOMContentLoaded', () => {
+    $('in-nombre').value = nombreGuardado();
+    $('inv-nombre').value = nombreGuardado();
+    mostrarInicio('');
+  });
+</script>
+</body>
+</html>
